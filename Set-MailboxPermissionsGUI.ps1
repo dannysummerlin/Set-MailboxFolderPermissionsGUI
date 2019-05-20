@@ -21,9 +21,22 @@ Add-Type -AssemblyName System.Windows.Forms
 
 # Powershell Remoting to Exchange
 #$Credential = Get-Credential
-$ExchangeServer = 'YourExchangeServer'
-$Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri http://$ExchangeServer/PowerShell/ -Authentication Kerberos -AllowRedirection #-Credential $Credential
-Import-PSSession $Session -DisableNameChecking
+$MODE = "Office365" # maybe make an arg or a setting
+if($MODE -eq "Office365") {
+    # create a securevalues.ps1 file to hold your login information, then load from file:
+	# o365_UserName - admin user for Office 365
+	# o365_Key - key used to store and decrypt the O365 admin password
+    # o365_PasswordFile - a single line file with the password encrypted with the key
+    Import-Module "./securevalues.ps1" -Force
+    $password = get-content $o365_PasswordFile | convertto-securestring -key $o365_Key
+    $UserCredential = new-object -typename System.Management.Automation.PSCredential -argumentlist $o365_UserName,$password
+	$Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri "https://outlook.office365.com/powershell-liveid/" -Credential $UserCredential -Authentication Basic -AllowRedirection
+	Connect-MsolService -Credential $UserCredential
+} else {
+    $ExchangeServer = "yourhostname"
+    $Session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri "http://$ExchangeServer/PowerShell/" -Authentication Kerberos -AllowRedirection #-Credential $Credential
+}
+Import-PSSession $Session #-DisableNameChecking
 
 $ErrorActionPreference = 'SilentlyContinue'
 $WarningPreference = 'SilentlyContinue'
@@ -347,50 +360,39 @@ function Disable-FolderGroupBox {
   $ModifyButton.Enabled                 = $true
 }
 
-function Enable-SpecificFolderCombobox {
-  $SpecificFolderComboBox.Enabled  = $true
-  
-}
+function Enable-SpecificFolderCombobox { $SpecificFolderComboBox.Enabled  = $true }
 
 # Check if Mailbox exists
 function Test-Mailbox {
-
     try {
         $mailbox = Get-mailbox -Identity $MailboxTextBox.Text
-    } catch { }
-     
+    } catch {
+        $ErrorMessage = $_.Exception.Message
+        $FailedItem = $_.Exception.ItemName
+        $MainTextBox.AppendText("! "+$FaileItem+": " + $ErrorMessage + "$NewLine")
+    }
     if ($mailbox) {
         $ErrorProvider1.Clear()
     } else { 
         $ErrorProvider1.SetError($MailboxTextBox, 'Enter a valid Mailbox name (Alias)')
+        $MainTextBox.AppendText("! Enter a valid Mailbox name (Alias): " + $MailboxTextBox.Text + "$NewLine")
     }
-    
 }
 
 # Check if User exists
 function Test-User {
-
-    try {
-        $user = Get-mailbox -Identity $UserTextbox.Text
-    } catch { }
-    
+    try { $user = Get-Mailbox -Identity $UserTextbox.Text } catch { }
     if (($user) -or ((Get-distributiongroup $UserTextbox.Text).RecipientType -eq 'MailUniversalSecurityGroup') -or ($UserTextbox.TextLength -eq 0)) {
         $ErrorProvider2.Clear()
-    } else { 
-        $ErrorProvider2.SetError($UserTextbox, 'Enter a valid username (Alias)')
-    }
-    
+    } else { $ErrorProvider2.SetError($UserTextbox, 'Enter a valid username (Alias)') }
 }
 
 # Create mailbox folder list in a drop-down menu excluding exceptions
 function Get-FolderList {
-
   Enable-SpecificFolderCombobox
-  
   try {
       $mailbox = Get-mailbox -Identity $MailboxTextBox.Text
   } catch { }
-      
   if ($mailbox) {
       (Get-MailboxFolderStatistics $MailboxTextBox.Text).FolderPath | Where-Object {!($FolderExclusions -contains $_)} | ForEach-Object { [void] $SpecificFolderComboBox.Items.Add($_) }
       $ErrorProvider3.Clear()
@@ -400,16 +402,13 @@ function Get-FolderList {
 }
 
 function Disable-SpecificFolderComboBox {
-
   $SpecificFolderComboBox.enabled  = $false
   $SpecificFolderComboBox.ResetText()
   $SpecificFolderComboBox.Items.Clear()
-  
 }
 
 
 function Get-MailboxFolderPermissions {
-    
     $mailbox = $MailboxTextBox.Text
     $user = $UserTextBox.Text
     $CheckButton.Enabled = $false
@@ -420,66 +419,46 @@ function Get-MailboxFolderPermissions {
 
     # Check if Mailbox TextBox field is not empty
     if ($MailboxTextBox.TextLength -ne 0) {
-       
         # Check if Mailbox exists
         if (Get-mailbox -Identity $Mailbox) {             
-
             # Initialize Progress Bar
             $Progressbar.Value = 0
             $ProgressBar.Maximum =Get-MailboxFolderStatistics -Identity $mailbox | Measure-Object | Select-Object -ExpandProperty Count
-                    
             # Check if User TextBox field is empty
             if ($UserTextBox.TextLength -eq 0) {
-                
                 $MainTextBox.AppendText("[{0}] Checking the existing permissions for all users on mailbox $mailbox..." -f (Get-Date -Format T)+$NewLine)
-                
                 # Check who has "Send on Behalf" permissions
-                $sendonbehalf = Get-Mailbox -Identity $mailbox | Where-Object { $_.GrantSendOnBehalfTo -ne $null } | Select-Object -ExpandProperty GrantSendOnBehalfTo
-
+                $sendonbehalf = Get-Mailbox -Identity $mailbox | Where-Object { $null -ne $_.GrantSendOnBehalfTo } | Select-Object -ExpandProperty GrantSendOnBehalfTo
                 ForEach ($user in $sendonbehalf) {
                     # Split the "domain/OU/OU/Display Name" into substring array and select last member "Display Name"
                     $usr = $user.Split('/')[-1]
-                    
                     # This line works with SnappIn only
                     #$MainTextBox.AppendText("[{0}] Send on Behalf Permission: $($user.Name)" -f (Get-Date -Format T) +$NewLine)
-                    
                     $MainTextBox.AppendText("[{0}] Send on Behalf Permission: $usr" -f (Get-Date -Format T) +$NewLine)
                 }
                 
                 # Check who has "Send as Mailbox" permissions
                 $sendasmailbox = Get-Mailbox -Identity $mailbox | Get-ADPermission | Where-Object { ($_.ExtendedRights -like '*send*') -and ($_.IsInherited -eq $false) -and ($_.user.tostring() -ne 'NT AUTHORITY\SELF') -and ($_.user.tostring() -notlike 'S-1-*') } | Select-Object -ExpandProperty User
-                
                 ForEach ($line in $sendasmailbox) {
-                    
                     # Split the "DOMAIN\Username" into two substrings and select second one: "Username"
                     $user = $line.Split('\')[1]
-                    
                     # Check if it's user, otherwise it's a group
                     if (Get-Mailbox $user -erroraction SilentlyContinue) {
                             $user = Get-Mailbox $user | Select-Object -ExpandProperty DisplayName
                     }
-    
                     $MainTextBox.AppendText("[{0}] Send as Mailbox Permission: $user" -f (Get-Date -Format T)+$NewLine)
                 }
-
-                
                 # Check who has "Full Mailbox" permissions
                 $fullmailboxpermissions = Get-Mailbox -Identity $mailbox | Get-MailboxPermission | Where-Object { ($_.IsInherited -eq $false) -and ($_.user.tostring() -ne 'NT AUTHORITY\SELF') -and ($_.user.tostring() -notlike 'S-1-*') } | Select-Object -ExpandProperty User
-
                 ForEach ($line in $fullmailboxpermissions){ 
-                    
                     # Split the "DOMAIN\Username" into two substrings and select second one: "Username"
                     $user = $line.RawIdentity.Split('\')[1]
-                        
                     # Check if it's user, otherwise it's a group
                     if (Get-Mailbox $user) {
                             $user = Get-Mailbox $user | Select-Object -ExpandProperty DisplayName
                     }
-    
                     $MainTextBox.AppendText("[{0}] Full Mailbox Permission: $user" -f (Get-Date -Format T)+$NewLine)
                 }
-                
-
                 # Show all Users and their access rights
                 ForEach ($f in (Get-MailboxFolderStatistics $Mailbox)) {
                     $Progressbar.Increment(1)
@@ -708,7 +687,6 @@ Function Save-Log {
     $date = Get-Date -Format FileDate
     $Filename = 'Log_'+$date+'.txt'
     $LogFile = Join-Path $PSScriptRoot ($Filename)
-    
     if (Test-Path -Path $LogFile){
         Add-Content -Path $LogFile -Value $MainTextBox.Text
         $MainTextBox.AppendText("Log has been saved to file: $Logfile"+"$NewLine")
@@ -718,8 +696,7 @@ Function Save-Log {
         Add-Content -Path $LogFile -Value $MainTextBox.Text
         $MainTextBox.AppendText("Log has been saved to file: $Logfile"+"$NewLine")
         $MainTextBox.AppendText('--------------------------------------------------'+"$NewLine")  
-    }
-      
+    }   
 }  
 
 $MailboxTextBox.Add_Leave({ Test-Mailbox })
